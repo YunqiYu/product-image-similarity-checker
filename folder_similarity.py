@@ -146,30 +146,16 @@ def metadata_for_candidate(
 
 
 def default_compare_prompt_template() -> str:
-    return """你是资深商品图片视觉相似度评估专家。
-现在给你两张商品图片：
-- 第一张是目标图；
-- 第二张是竞品图。
-
-请只评估商品正面印刷图案，不要因为商品类型、摆放角度、盘子/纸巾数量、包装组合、拍摄背景、阴影、页面文字而扣分。
-
-请从四个维度分别给出 0-100 的相似度：
-1. color相似度：比较主要视觉配色是否接近，忽略白色摄影背景。
-2. style相似度：比较插画、矢量、水彩、写实、特效等视觉风格是否接近。
-3. elements相似度：比较主体元素、主题元素、主设计文案和艺术字内容是否一致或语义接近。
-4. format相似度：比较散排、居中、环绕、铺满、文案居中等构图关系是否接近。
-
-综合相似度 = elements相似度*45% + style相似度*20% + color相似度*15% + format相似度*20%
-相似阈值为 {threshold}%。
-
-只输出合法 JSON，不要输出解释性段落或 Markdown。格式如下：
+    return """Compare the target product image with the competitor product image.
+Return only valid JSON with these keys:
 {
-  "color相似度": 98,
-  "style相似度": 95,
-  "elements相似度": 95,
-  "format相似度": 96,
-  "相似理由": "两张图在主体元素、风格、颜色、版式和主文案上高度一致"
+  "color相似度": 0,
+  "style相似度": 0,
+  "elements相似度": 0,
+  "format相似度": 0,
+  "相似理由": ""
 }
+Similarity threshold: {threshold}%.
 """
 
 
