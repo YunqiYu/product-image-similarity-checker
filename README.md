@@ -38,6 +38,14 @@ OPENAI_IMAGE_MODE=high
 python folder_similarity.py
 ```
 
+默认 Prompt 文件：
+
+```text
+config\prompt.md
+```
+
+可以通过 `--prompt` 指定其他 Prompt 文件，Prompt 中的 `{threshold}` 会被替换为当前相似阈值。
+
 指定输入目录与输出文件：
 
 ```powershell
