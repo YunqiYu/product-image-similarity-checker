@@ -55,7 +55,7 @@ def upgrade_amazon_image_url(url: str) -> str:
     """Use a higher-resolution Amazon CDN variant when the URL shape allows it."""
     match = re.match(r"^(https://[^?]+?/images/I/[^._]+)(?:\._[^.]+_)?\.jpg$", url)
     if match:
-        return match.group(1) + "._AC_SL1500_.jpg"
+        return match.group(1) + "._AC_SL2000_.jpg"
     return url
 
 
@@ -394,8 +394,7 @@ def download_preview_image(image_url: str, image_dir: Path, row: int) -> Path:
 
     with PILImage.open(raw_path) as image:
         image = image.convert("RGB")
-        image.thumbnail((960, 960))
-        image.save(preview_path, format="JPEG", quality=95, optimize=True)
+        image.save(preview_path, format="JPEG", quality=98)
 
     raw_path.unlink(missing_ok=True)
     return preview_path
@@ -407,7 +406,7 @@ def insert_preview_image(out_ws: Any, image_path: Path, output_row: int) -> None
     image = ExcelImage(str(image_path))
     image.width = 220
     image.height = 220
-    out_ws.row_dimensions[output_row].height = 170
+    out_ws.row_dimensions[output_row].height = 380
     out_ws.add_image(image, f"E{output_row}")
 
 

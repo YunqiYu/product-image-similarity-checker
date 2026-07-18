@@ -291,7 +291,7 @@ def direct_compare_images(
     return normalize_similarity_payload(extract_json(response.choices[0].message.content or ""), threshold)
 
 
-def add_image(ws: Any, image_path: Path, cell: str, size: int = 220) -> None:
+def add_image(ws: Any, image_path: Path, cell: str, size: int = 500) -> None:
     image = ExcelImage(str(image_path))
     image.width = size
     image.height = size
@@ -302,7 +302,7 @@ def write_target_block(ws: Any, target_image: Path, target_result: dict[str, Any
     headers = ["目标图片", "target_color", "target_style", "target_elements", "target_format", "target_wordArt"]
     for col, header in enumerate(headers, start=1):
         ws.cell(row=1, column=col).value = header
-    ws.row_dimensions[2].height = 170
+    ws.row_dimensions[2].height = 380
     ws.column_dimensions["A"].width = 32
     add_image(ws, target_image, "A2")
     ws.cell(row=2, column=2).value = target_result["color"]
@@ -489,7 +489,7 @@ def main() -> int:
         for offset, value in enumerate(values):
             out_ws.cell(row=out_row, column=start_col + offset).value = value
         if item["image_path"] and headers.get("图片"):
-            out_ws.row_dimensions[out_row].height = 170
+            out_ws.row_dimensions[out_row].height = 380
             add_image(out_ws, item["image_path"], f"{source_ws.cell(1, headers['图片']).column_letter}{out_row}")
 
     out_wb.save(output_path)
