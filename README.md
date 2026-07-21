@@ -41,7 +41,7 @@ python folder_similarity.py
 默认 Prompt 文件：
 
 ```text
-config\prompt.md
+config\similarity_prompt.md
 ```
 
 可以通过 `--prompt` 指定其他 Prompt 文件，Prompt 中的 `{threshold}` 会被替换为当前相似阈值。
