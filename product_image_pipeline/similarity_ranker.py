@@ -1,4 +1,4 @@
-"""相似度排序核心：完成抽样、模型比较和内部 Top 结果 Excel 生成。"""
+"""相似度排序核心：完成抽样、模型比较和内部 Top 结果 JSON 生成。"""
 
 from __future__ import annotations
 
@@ -16,10 +16,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from zipfile import ZipFile
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Alignment
 from PIL import Image as PILImage
 
 from .models import SimilarityWeights
@@ -55,30 +53,13 @@ def format_duration(seconds: float) -> str:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "inputs" / "测试"
-DEFAULT_OUTPUT = PROJECT_ROOT / "outputs" / "测试_图片相似度结果.xlsx"
+DEFAULT_OUTPUT = PROJECT_ROOT / "outputs" / "测试_相似度排序.json"
 DEFAULT_RUN_LOG = PROJECT_ROOT / "outputs" / "测试_图片相似度结果.log"
 DEFAULT_METADATA_EXCEL = PROJECT_ROOT / "inputs" / "一品红表格 - 打标核对.xlsx"
 DEFAULT_METADATA_SHEET = "最终结果"
 DEFAULT_PROMPT = PROJECT_ROOT / "config" / "similarity_prompt.md"
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-FALLBACK_OUTPUT_HEADERS = [
-    "1级 分类",
-    "主题标签",
-    "ASIN",
-    "图片链接",
-    "图片",
-    "综合相似度",
-    "产品链接",
-    "品牌",
-    "pcs",
-    "标题",
-    "近30天销量",
-    "上架时间",
-    "价格",
-    "数据来源",
-    "价格趋势图",
-]
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,8 +77,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights", default=None, help="JSON similarity weights supplied by the calling system.")
     # Excel输入量过大时随机抽样，控制模型调用数量和 Token 成本。（默认1000抽样1000条）
     parser.add_argument("--max-candidates", type=int, default=1000, help="Maximum random candidate images to send to the model.")
-    # 限制最终输出300条excel(按照相似度排序)，避免excel过大，影响业务判断
-    parser.add_argument("--max-results", type=int, default=300, help="Maximum rows to keep in the output Excel.")
+    # 限制阶段二最多处理300条，控制高精度打标的调用量和最终表规模。
+    parser.add_argument("--max-results", type=int, default=300, help="Maximum ranked items to keep in the internal JSON.")
     parser.add_argument("--metadata-excel", default=str(DEFAULT_METADATA_EXCEL))
     parser.add_argument("--metadata-sheet", default=DEFAULT_METADATA_SHEET)
     parser.add_argument("--prompt", default=str(DEFAULT_PROMPT))
@@ -169,26 +150,6 @@ def load_excel_context(
     return headers, metadata
 
 
-def build_output_headers(source_headers: list[str]) -> list[str]:
-    excluded_headers = {"综合相似度", "颜色", "风格", "元素", "排版"}
-    headers = [
-        "类别" if header == "类目路径" else header
-        for header in source_headers
-        if header and header not in excluded_headers
-    ]
-    if not headers:
-        headers = [header for header in FALLBACK_OUTPUT_HEADERS if header not in excluded_headers]
-    if "图片" in headers:
-        insert_at = headers.index("图片") + 1
-    elif "图片链接" in headers:
-        insert_at = headers.index("图片链接") + 1
-        headers.insert(insert_at, "图片")
-        insert_at += 1
-    else:
-        insert_at = len(headers)
-    return headers[:insert_at] + ["综合相似度"] + headers[insert_at:]
-
-
 def metadata_for_candidate(
     candidate: Path,
     manifest: dict[str, dict[str, str]],
@@ -226,6 +187,20 @@ def extract_price_trend_images(
     headers = [str(cell.value).strip() if cell.value is not None else "" for cell in worksheet[1]]
     if "价格趋势图" not in headers:
         return {}
+
+    # 常规 Excel Drawing 图片可直接通过 openpyxl 锚点定位，优先于底层 XML 解析。
+    trend_col = headers.index("价格趋势图") + 1
+    anchored_trends: dict[int, Path] = {}
+    for image in worksheet._images:
+        marker = getattr(getattr(image, "anchor", None), "_from", None)
+        if marker is None or marker.col + 1 != trend_col or marker.row + 1 not in source_rows:
+            continue
+        with PILImage.open(BytesIO(image._data())) as source:
+            image_path = cache_dir / f"trend_row_{marker.row + 1}.png"
+            source.convert("RGB").save(image_path, "PNG")
+        anchored_trends[marker.row + 1] = image_path
+    if anchored_trends:
+        return anchored_trends
 
     with ZipFile(excel_path) as archive:
         dispimg_images = extract_dispimg_price_trend_images(worksheet, headers, archive, cache_dir, source_rows)
@@ -276,10 +251,21 @@ def extract_price_trend_images(
         drawing_ns = {
             "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
         }
+        drawing_ns["xdr"] = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        trend_col = headers.index("价格趋势图")
         trend_images: dict[int, Path] = {}
-        blips = drawing_root.findall(".//a:blip", drawing_ns)
-        for offset, blip in enumerate(blips, start=2):
-            if offset not in source_rows:
+        anchors = drawing_root.findall("xdr:twoCellAnchor", drawing_ns) + drawing_root.findall("xdr:oneCellAnchor", drawing_ns)
+        for anchor in anchors:
+            marker = anchor.find("xdr:from", drawing_ns)
+            blip = anchor.find(".//a:blip", drawing_ns)
+            if marker is None or blip is None:
+                continue
+            col_node = marker.find("xdr:col", drawing_ns)
+            row_node = marker.find("xdr:row", drawing_ns)
+            if col_node is None or row_node is None:
+                continue
+            source_row = int(row_node.text) + 1
+            if int(col_node.text) != trend_col or source_row not in source_rows:
                 continue
             rel_id = blip.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
             target = drawing_rels.get(rel_id or "")
@@ -289,9 +275,9 @@ def extract_price_trend_images(
             if media_path not in archive.namelist():
                 continue
             with PILImage.open(BytesIO(archive.read(media_path))) as source:
-                image_path = cache_dir / f"trend_row_{offset}.png"
+                image_path = cache_dir / f"trend_row_{source_row}.png"
                 source.convert("RGB").save(image_path, "PNG")
-            trend_images[offset] = image_path
+            trend_images[source_row] = image_path
     return trend_images
 
 
@@ -516,12 +502,10 @@ def main() -> int:
     candidates = sample_candidates(all_candidates, args.max_candidates)
     manifest = load_manifest(input_dir)
     metadata_excel_path = Path(args.metadata_excel)
-    cache_dir = output_path.parent / "_excel_image_cache" / output_path.stem
-    source_headers, excel_metadata = load_excel_context(
+    _, excel_metadata = load_excel_context(
         metadata_excel_path,
         args.metadata_sheet,
     )
-    output_headers = build_output_headers(source_headers)
 
     settings = ModelSettings.from_environment()
     model = args.model or settings.similarity_model
@@ -558,7 +542,16 @@ def main() -> int:
         done = 0
         for future in as_completed(futures):
             candidate = futures[future]
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception as exc:
+                # 单个并发任务异常时保留其失败记录，不能中断整批候选的排序。
+                result = {
+                    "path": candidate,
+                    "similarities": {},
+                    "error": f"工作线程异常：{exc}",
+                    "elapsed": 0.0,
+                }
             results[candidate] = result
             done += 1
             with run_log_path.open("a", encoding="utf-8") as log:
@@ -570,86 +563,44 @@ def main() -> int:
                 )
             print(f"[{done}/{len(candidates)}] {candidate.name} {json.dumps(result['similarities'], ensure_ascii=False)}")
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "相似度结果"
-    for col, header in enumerate(output_headers, start=1):
-        ws.cell(row=1, column=col).value = header
-    width_by_header = {
-        "1级分类": 14,
-        "主题标签": 18,
-        "基本主题": 18,
-        "ASIN": 18,
-        "图片链接": 46,
-        "图片": 32,
-        "综合相似度": 14,
-        "产品链接": 42,
-        "品牌": 18,
-        "pcs": 10,
-        "标题": 46,
-        "近30天销量": 14,
-        "上架时间": 16,
-        "价格": 12,
-        "数据来源": 16,
-        "类别": 16,
-        "价格趋势图": 52,
-    }
-    for col_index, header in enumerate(output_headers, start=1):
-        ws.column_dimensions[get_column_letter(col_index)].width = width_by_header.get(header, 16)
-
+    successful_candidates = [
+        candidate
+        for candidate in candidates
+        if not results[candidate]["error"] and results[candidate]["similarities"].get("综合相似度")
+    ]
+    if not successful_candidates:
+        raise RuntimeError("相似度排序没有成功结果，拒绝生成后续中间数据。")
     sorted_candidates = sorted(
-        candidates,
+        successful_candidates,
         key=lambda candidate: percent_sort_value(results[candidate]["similarities"].get("综合相似度")),
         reverse=True,
     )[: args.max_results]
-    output_source_rows = {
-        source_row_number
-        for candidate in sorted_candidates
-        for source_row_number in [metadata_for_candidate(candidate, manifest, excel_metadata).get("__source_row")]
-        if isinstance(source_row_number, int)
-    }
-    # 仅提取最终会写入 Excel 的行所对应的趋势图，避免处理全部源数据。
-    trend_images = extract_price_trend_images(
-        metadata_excel_path,
-        args.metadata_sheet,
-        cache_dir / "price_trends",
-        output_source_rows,
-    )
-    header_to_column = {header: index for index, header in enumerate(output_headers, start=1)}
-    image_column = header_to_column.get("图片")
-    overall_column = header_to_column["综合相似度"]
-    trend_column = header_to_column.get("价格趋势图")
 
-    for row_index, candidate in enumerate(sorted_candidates, start=2):
+    # 中间 JSON 只保存排序和回填所需数据，高清图和趋势图留到最终 Excel 再写入。
+    ranked_items: list[dict[str, Any]] = []
+    for candidate in sorted_candidates:
         result = results[candidate]
         similarities = result["similarities"]
         source_row = metadata_for_candidate(candidate, manifest, excel_metadata)
-        for col_index, header in enumerate(output_headers, start=1):
-            if header in {"图片", "综合相似度"}:
-                continue
-            ws.cell(row=row_index, column=col_index).value = source_row.get(header, "")
-        if "ASIN" in header_to_column:
-            ws.cell(row=row_index, column=header_to_column["ASIN"]).value = (
-                source_row.get("ASIN") or extract_asin_from_stem(candidate.stem)
-            )
-        ws.row_dimensions[row_index].height = 180
-        if image_column:
-            ws.cell(row=row_index, column=image_column).value = candidate.name
-            ws.cell(row=row_index, column=image_column).alignment = Alignment(horizontal="center", vertical="center")
-            add_image(ws, candidate, f"{get_column_letter(image_column)}{row_index}")
-        source_row_number = source_row.get("__source_row")
-        if trend_column and source_row_number in trend_images:
-            ws.cell(row=row_index, column=trend_column).value = ""
-            add_resized_image(
-                ws,
-                trend_images[source_row_number],
-                f"{get_column_letter(trend_column)}{row_index}",
-                width=360,
-                height=180,
-            )
-        ws.cell(row=row_index, column=overall_column).value = similarities["综合相似度"]
-
-    wb.save(output_path)
+        ranked_items.append({
+            "source_row": source_row.get("__source_row"),
+            "asin": source_row.get("ASIN") or extract_asin_from_stem(candidate.stem),
+            "image_url": source_row.get("图片链接", ""),
+            "image_name": candidate.name,
+            "overall_similarity": similarities["综合相似度"],
+            "similarities": similarities,
+            "error": result["error"],
+        })
+    intermediate_result = {
+        "schema_version": 1,
+        "target_image": target_image.name,
+        "candidate_count": len(candidates),
+        "result_count": len(ranked_items),
+        "threshold": args.similarity_threshold,
+        "weights": weights.as_dict(),
+        "items": ranked_items,
+    }
+    output_path.write_text(json.dumps(intermediate_result, ensure_ascii=False, indent=2), encoding="utf-8")
     with run_log_path.open("a", encoding="utf-8") as log:
         log.write(f"本次运行总时间: {format_duration(time.perf_counter() - run_started)}\n")
     print(f"Target image: {target_image}")

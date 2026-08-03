@@ -1,4 +1,6 @@
-"""视觉模型通用调用：图片编码、JSON 解析和 OpenAI 兼容客户端创建。"""
+"""视觉模型通用调用：
+将图片URL识别出来，转换为模型可接收的 data URL，提取模型返回的 JSON 数据，
+并创建 OpenAI 兼容客户端。"""
 
 from __future__ import annotations
 

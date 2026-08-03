@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 inputs/
 outputs/
+uploads/
 *.tmp
 .pytest_cache/
